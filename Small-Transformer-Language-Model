@@ -1,0 +1,796 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import random
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+print("Device:", device)
+#%%
+# ==========================================
+# 1. CREATE SYNTHETIC TRAINING DATA
+# ==========================================
+
+documents = [
+    """
+Question: What is Python?
+Answer: Python is a programming language used for
+automation, data science, machine learning, web development,
+and many other applications.
+
+Question: Who created Python?
+Answer: Python was created by Guido van Rossum.
+
+Question: What is PyTorch?
+Answer: PyTorch is a deep learning framework used to
+build and train neural networks.
+
+Question: What is a Transformer?
+Answer: A Transformer is a neural network architecture
+that uses attention mechanisms to process sequences
+and learn relationships between tokens.
+
+Question: What is self attention?
+Answer: Self attention allows each token to look at
+other tokens in the same sequence and determine
+which tokens are important.
+
+Question: What is attention?
+Answer: Attention is a mechanism that allows a model
+to assign different importance to different tokens
+when processing a sequence.
+
+Question: What is machine learning?
+Answer: Machine learning is a field of artificial
+intelligence where models learn patterns from data
+and use those patterns to make predictions.
+
+Question: What is deep learning?
+Answer: Deep learning is a type of machine learning
+that uses neural networks with multiple layers.
+
+Question: What is a neural network?
+Answer: A neural network is a computational model
+made of interconnected layers that can learn patterns
+from data.
+
+Question: What is an embedding?
+Answer: An embedding converts discrete objects such as
+tokens into numerical vectors that a neural network
+can process.
+
+Question: What is a token?
+Answer: A token is a piece of text processed by a
+language model. A token can represent a word, part
+of a word, a character, or another text unit.
+
+Question: What is a token ID?
+Answer: A token ID is an integer that identifies a
+token in the tokenizer vocabulary.
+
+Question: What is a vocabulary?
+Answer: A vocabulary is the collection of tokens that
+a tokenizer can represent.
+
+Question: What is a language model?
+Answer: A language model learns patterns in text and
+predicts the probability of the next token.
+
+Question: How does GPT generate text?
+Answer: GPT generates text one token at a time.
+It uses the previous tokens as context and predicts
+a probability distribution for the next token.
+
+Question: What is a neural network layer?
+Answer: A neural network layer transforms its input
+using learned parameters and mathematical operations.
+
+Question: What is backpropagation?
+Answer: Backpropagation calculates gradients of the
+loss with respect to the model parameters.
+
+Question: What is gradient descent?
+Answer: Gradient descent updates model parameters in
+a direction that reduces the training loss.
+
+Question: What is cross entropy loss?
+Answer: Cross entropy measures the difference between
+the predicted probability distribution and the correct
+target token.
+
+Question: What is an optimizer?
+Answer: An optimizer updates the parameters of a neural
+network using the gradients calculated during training.
+
+Question: What is AdamW?
+Answer: AdamW is an optimization algorithm commonly used
+for training modern neural networks and Transformer models.
+"""
+]
+
+# Combine all documents into one large text
+text = "\n".join(documents)
+
+print("Number of characters:", len(text))
+print()
+print(text[:1000])
+#%%
+# ==========================================
+# 2. CHARACTER-LEVEL TOKENIZER
+# ==========================================
+
+chars = sorted(set(text))
+
+# Character → ID
+stoi = {
+    ch: i
+    for i, ch in enumerate(chars)
+}
+
+# ID → Character
+itos = {
+    i: ch
+    for i, ch in enumerate(chars)
+}
+
+vocab_size = len(chars)
+
+print("Vocabulary size:", vocab_size)
+print("Characters:", chars)
+#%%
+# ==========================================
+# 3. ENCODE / DECODE
+# ==========================================
+
+def encode(text):
+    return [stoi[c] for c in text]
+
+
+def decode(ids):
+    return "".join(itos[i] for i in ids)
+
+
+# Test
+sample = "What is Python?"
+
+encoded = encode(sample)
+
+print("Original:")
+print(sample)
+
+print("\nToken IDs:")
+print(encoded)
+
+print("\nDecoded:")
+print(decode(encoded))
+#%%
+# ==========================================
+# 4. TEXT → TOKEN IDS
+# ==========================================
+
+data = torch.tensor(
+    encode(text),
+    dtype=torch.long
+)
+
+print("Total tokens:", len(data))
+print("First 100 token IDs:")
+print(data[:100])
+#%%
+# ==========================================
+# 5. CREATE TRAINING SEQUENCES
+# ==========================================
+
+block_size = 128
+
+X = []
+Y = []
+
+for i in range(len(data) - block_size):
+
+    # Input
+    x = data[i:i + block_size]
+
+    # Same sequence shifted by one character
+    y = data[i + 1:i + block_size + 1]
+
+    X.append(x)
+    Y.append(y)
+
+X = torch.stack(X)
+Y = torch.stack(Y)
+
+print("X shape:", X.shape)
+print("Y shape:", Y.shape)
+#%%
+# ==========================================
+# TRANSFORMER CONFIGURATION
+# ==========================================
+
+vocab_size = len(chars)
+
+block_size = 128
+
+d_model = 128       # Embedding dimension
+n_heads = 4         # Number of attention heads
+n_layers = 4        # Number of Transformer blocks
+
+dropout = 0.1
+
+print("Vocabulary size:", vocab_size)
+print("Embedding dimension:", d_model)
+print("Attention heads:", n_heads)
+print("Transformer layers:", n_layers)
+#%%
+# ==========================================
+# SINGLE SELF-ATTENTION HEAD
+# ==========================================
+
+class Head(nn.Module):
+
+    def __init__(self, head_size):
+
+        super().__init__()
+
+        # Create Query, Key and Value projections
+        self.key = nn.Linear(d_model, head_size, bias=False)
+        self.query = nn.Linear(d_model, head_size, bias=False)
+        self.value = nn.Linear(d_model, head_size, bias=False)
+
+        # Causal mask
+        self.register_buffer(
+            "tril",
+            torch.tril(
+                torch.ones(block_size, block_size)
+            )
+        )
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+
+        B, T, C = x.shape
+
+        # --------------------------------
+        # Q, K, V
+        # --------------------------------
+
+        K = self.key(x)
+        Q = self.query(x)
+        V = self.value(x)
+
+        # --------------------------------
+        # Attention scores
+        # --------------------------------
+
+        scores = Q @ K.transpose(-2, -1)
+
+        scores = scores / (K.shape[-1] ** 0.5)
+
+        # --------------------------------
+        # Causal mask
+        # --------------------------------
+
+        scores = scores.masked_fill(
+            self.tril[:T, :T] == 0,
+            float("-inf")
+        )
+
+        # --------------------------------
+        # Softmax
+        # --------------------------------
+
+        attention = F.softmax(
+            scores,
+            dim=-1
+        )
+
+        attention = self.dropout(attention)
+
+        # --------------------------------
+        # Weighted Values
+        # --------------------------------
+
+        out = attention @ V
+
+        return out
+#%%
+# ==========================================
+# MULTI-HEAD ATTENTION
+# ==========================================
+
+class MultiHeadAttention(nn.Module):
+
+    def __init__(self, num_heads, head_size):
+
+        super().__init__()
+
+        self.heads = nn.ModuleList(
+            [
+                Head(head_size)
+                for _ in range(num_heads)
+            ]
+        )
+
+        # Mix information from all heads
+        self.projection = nn.Linear(
+            num_heads * head_size,
+            d_model
+        )
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+
+        # Run all attention heads
+        out = torch.cat(
+            [
+                head(x)
+                for head in self.heads
+            ],
+            dim=-1
+        )
+
+        # Linear projection
+        out = self.projection(out)
+
+        out = self.dropout(out)
+
+        return out
+#%%
+# ==========================================
+# FEED FORWARD NETWORK
+# ==========================================
+
+class FeedForward(nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.network = nn.Sequential(
+
+            nn.Linear(
+                d_model,
+                4 * d_model
+            ),
+
+            nn.ReLU(),
+
+            nn.Linear(
+                4 * d_model,
+                d_model
+            ),
+
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+
+        return self.network(x)
+#%%
+# ==========================================
+# TRANSFORMER BLOCK
+# ==========================================
+
+class TransformerBlock(nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
+
+        head_size = d_model // n_heads
+
+        self.attention = MultiHeadAttention(
+            n_heads,
+            head_size
+        )
+
+        self.feed_forward = FeedForward()
+
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ln2 = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+
+        # --------------------------------
+        # Self Attention
+        # --------------------------------
+
+        x = x + self.attention(
+            self.ln1(x)
+        )
+
+        # --------------------------------
+        # Feed Forward
+        # --------------------------------
+
+        x = x + self.feed_forward(
+            self.ln2(x)
+        )
+
+        return x
+#%%
+# ==========================================
+# MINI GPT MODEL
+# ==========================================
+
+class MiniGPT(nn.Module):
+
+    def __init__(self):
+
+        super().__init__()
+
+        # ------------------------------
+        # Token embedding
+        # ------------------------------
+
+        self.token_embedding = nn.Embedding(
+            vocab_size,
+            d_model
+        )
+
+        # ------------------------------
+        # Position embedding
+        # ------------------------------
+
+        self.position_embedding = nn.Embedding(
+            block_size,
+            d_model
+        )
+
+        # ------------------------------
+        # Transformer blocks
+        # ------------------------------
+
+        self.blocks = nn.Sequential(
+            *[
+                TransformerBlock()
+                for _ in range(n_layers)
+            ]
+        )
+
+        # ------------------------------
+        # Final LayerNorm
+        # ------------------------------
+
+        self.ln_final = nn.LayerNorm(
+            d_model
+        )
+
+        # ------------------------------
+        # Language Model Head
+        # ------------------------------
+
+        self.lm_head = nn.Linear(
+            d_model,
+            vocab_size
+        )
+
+    def forward(self, idx, targets=None):
+
+        B, T = idx.shape
+
+        # ------------------------------
+        # Token embeddings
+        # ------------------------------
+
+        token_emb = self.token_embedding(idx)
+
+        # ------------------------------
+        # Position embeddings
+        # ------------------------------
+
+        positions = torch.arange(
+            T,
+            device=idx.device
+        )
+
+        position_emb = self.position_embedding(
+            positions
+        )
+
+        # ------------------------------
+        # Combine
+        # ------------------------------
+
+        x = token_emb + position_emb
+
+        # ------------------------------
+        # Transformer
+        # ------------------------------
+
+        x = self.blocks(x)
+
+        # ------------------------------
+        # Final normalization
+        # ------------------------------
+
+        x = self.ln_final(x)
+
+        # ------------------------------
+        # Vocabulary logits
+        # ------------------------------
+
+        logits = self.lm_head(x)
+
+        # ------------------------------
+        # Calculate loss
+        # ------------------------------
+
+        loss = None
+
+        if targets is not None:
+
+            B, T, C = logits.shape
+
+            logits_flat = logits.reshape(
+                B * T,
+                C
+            )
+
+            targets_flat = targets.reshape(
+                B * T
+            )
+
+            loss = F.cross_entropy(
+                logits_flat,
+                targets_flat
+            )
+
+        return logits, loss
+#%%
+# ==========================================
+# CREATE MODEL
+# ==========================================
+
+model = MiniGPT().to(device)
+
+print(model)
+
+# Count parameters
+num_params = sum(
+    p.numel()
+    for p in model.parameters()
+)
+
+print(
+    f"\nParameters: {num_params:,}"
+)
+#%%
+# ==========================================
+# BATCHING
+# ==========================================
+
+batch_size = 32
+
+def get_batch():
+
+    ix = torch.randint(
+        0,
+        len(X),
+        (batch_size,)
+    )
+
+    x = X[ix].to(device)
+    y = Y[ix].to(device)
+
+    return x, y
+
+
+xb, yb = get_batch()
+
+print("Input shape :", xb.shape)
+print("Target shape:", yb.shape)
+#%%
+# ==========================================
+# TEST FORWARD PASS
+# ==========================================
+
+logits, loss = model(
+    xb,
+    yb
+)
+
+print("Logits shape:", logits.shape)
+print("Loss:", loss.item())
+#%%
+# ==========================================
+# TRAINING SETUP
+# ==========================================
+
+optimizer = torch.optim.AdamW(
+    model.parameters(),
+    lr=3e-4
+)
+
+max_steps = 3000
+
+print("Starting training...")
+#%%
+# ==========================================
+# TRAIN
+# ==========================================
+
+model.train()
+
+for step in range(max_steps):
+
+    # -----------------------------
+    # Get a random batch
+    # -----------------------------
+
+    xb, yb = get_batch()
+
+    # -----------------------------
+    # Forward pass
+    # -----------------------------
+
+    logits, loss = model(xb, yb)
+
+    # -----------------------------
+    # Clear old gradients
+    # -----------------------------
+
+    optimizer.zero_grad()
+
+    # -----------------------------
+    # Backpropagation
+    # -----------------------------
+
+    loss.backward()
+
+    # -----------------------------
+    # Update parameters
+    # -----------------------------
+
+    optimizer.step()
+
+    # -----------------------------
+    # Print progress
+    # -----------------------------
+
+    if step % 100 == 0:
+
+        print(
+            f"Step {step:4d} | "
+            f"Loss {loss.item():.4f}"
+        )
+#%%
+# ==========================================
+# TRAIN + RECORD LOSS
+# ==========================================
+
+losses = []
+
+model.train()
+
+for step in range(max_steps):
+
+    xb, yb = get_batch()
+
+    logits, loss = model(xb, yb)
+
+    optimizer.zero_grad()
+
+    loss.backward()
+
+    optimizer.step()
+
+    losses.append(loss.item())
+
+    if step % 100 == 0:
+
+        print(
+            f"Step {step:4d} | "
+            f"Loss {loss.item():.4f}"
+        )
+#%%
+# ==========================================
+# TEXT GENERATION
+# ==========================================
+
+@torch.no_grad()
+def generate(prompt, max_new_tokens=200):
+
+    model.eval()
+
+    # Convert prompt to token IDs
+    idx = torch.tensor(
+        [encode(prompt)],
+        dtype=torch.long
+    ).to(device)
+
+    for _ in range(max_new_tokens):
+
+        # Only keep the last block_size tokens
+        idx_cond = idx[:, -block_size:]
+
+        # Forward pass
+        logits, _ = model(idx_cond)
+
+        # We only care about the LAST position
+        logits = logits[:, -1, :]
+
+        # Convert logits → probabilities
+        probabilities = F.softmax(
+            logits,
+            dim=-1
+        )
+
+        # Choose next token
+        next_token = torch.multinomial(
+            probabilities,
+            num_samples=1
+        )
+
+        # Add token to sequence
+        idx = torch.cat(
+            (idx, next_token),
+            dim=1
+        )
+
+    # Convert IDs back to text
+    return decode(idx[0].tolist())
+#%%
+prompt = "Question: What is Python?\nAnswer:"
+
+print(
+    generate(
+        prompt,
+        max_new_tokens=200
+    )
+)
+#%%
+@torch.no_grad()
+def generate_step_by_step(prompt, max_new_tokens=50):
+
+    model.eval()
+
+    idx = torch.tensor(
+        [encode(prompt)],
+        dtype=torch.long
+    ).to(device)
+
+    for step in range(max_new_tokens):
+
+        idx_cond = idx[:, -block_size:]
+
+        logits, _ = model(idx_cond)
+
+        # Last token's prediction
+        logits = logits[:, -1, :]
+
+        probabilities = F.softmax(
+            logits,
+            dim=-1
+        )
+
+        next_token = torch.multinomial(
+            probabilities,
+            1
+        )
+
+        token_id = next_token.item()
+
+        token = decode([token_id])
+
+        print(
+            f"Step {step+1:02d}: "
+            f"Token ID = {token_id:3d} "
+            f"Token = {repr(token)}"
+        )
+
+        idx = torch.cat(
+            [idx, next_token],
+            dim=1
+        )
+
+    print("\nFinal output:")
+    print(decode(idx[0].tolist()))
+#%%
+generate_step_by_step(
+    "Question: What is language ?",
+    max_new_tokens=100
+)
+#%%
